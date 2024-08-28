@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import pickle
+# import pickle
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
@@ -20,11 +20,9 @@ ts_monthly_returns = np.log(ts_monthly / ts_monthly.shift(1))
 ts_monthly_returns = ts_monthly_returns.dropna()
 
 sector_names = ts_monthly_returns.columns
-# plt.plot(ts_monthly_returns)
-# plt.show()
 
 # model
-params = {}
+# params = {}
 mean_vol = {sector: 0 for sector in sector_names}
 
 scale = 1
@@ -36,8 +34,7 @@ Dt_mat = np.zeros((N, N, T))
 resid_list = np.zeros((N, T))
 arch_mean_type = 'standard'  # 'standard' #'half_var'
 udata_list, Dt_mat, model_parameters = DCCEGARCH.run_garch_on_return(ts_monthly_returns, udata_list, model_parameters,
-                                                                     Dt_mat,
-                                                                     resid_list, arch_mean_type=arch_mean_type,
+                                                                     Dt_mat, resid_list, arch_mean_type=arch_mean_type,
                                                                      model="EGARCH_with_vol_in_mean")
 cons = ({'type': 'ineq', 'fun': lambda x: -x[0] - x[1] + 1})
 lc = LinearConstraint([[1, 1]], -np.inf, 1)
@@ -46,8 +43,8 @@ bnds = ((0, 0.5), (0, 0.9997))
 opt_out = minimize(DCCEGARCH.loglike_norm_dcc_copula, np.array([0.18, 0.8]), args=(udata_list, Dt_mat, resid_list),
                    bounds=bnds, constraints=cons, method='SLSQP')
 
-print(opt_out.success)
-print(opt_out.x)
+# print(opt_out.success)
+# print(opt_out.x)
 
 # GARCH PARAMETERS
 omega = [model_parameters[x].params['omega'] for x in model_parameters]
@@ -62,7 +59,7 @@ a = opt_out.x[0]
 b = opt_out.x[1]
 
 trdata = np.array(norm.ppf(udata_list).T, ndmin=2)
-Rt, veclRt, Qt = DCCEGARCH.dcceq([a, b], trdata, Dt_mat, resid_list)
+Rt, veclRt, Qt, Qbar = DCCEGARCH.dcceq([a, b], trdata, Dt_mat, resid_list)
 
 _, N, T = np.shape(Rt)
 D_t = np.zeros((N, N, T))
@@ -78,9 +75,9 @@ for t in range(T):
     Ht[:, :, t] = D_t[:, :, t] @ Rt[:, :, t] @ D_t[:, :, t]
 
 nsteps = 60
-mIS = 250
-mOOS = 250
-np.random.seed(100)
+mIS = 100
+mOOS = 100
+np.random.seed(1245)
 
 NRiskyAssets = len(omega)
 
@@ -99,8 +96,8 @@ simulcorrOOS = np.empty([mOOS, NRiskyAssets, NRiskyAssets, nsteps])
 simulQOOS = np.empty([mOOS, NRiskyAssets, NRiskyAssets, nsteps])
 
 # Simulate log-returns and volatilities for the risky assets.
-IS_sample = DCCEGARCH.DCC_EGARCH(trdata, params, a, b, sims=nsteps, burn=2000)
-OS_sample = DCCEGARCH.DCC_EGARCH(trdata, params, a, b, sims=nsteps, burn=2000)
+IS_sample = DCCEGARCH.DCC_EGARCH(trdata, params, a, b, sims=nsteps)
+OS_sample = DCCEGARCH.DCC_EGARCH(trdata, params, a, b, sims=nsteps)
 
 for i in range(mIS):
     IS_out = IS_sample.simulate_dcc2()
@@ -129,7 +126,9 @@ variable_list = {'simullogreturnsIS': simullogreturnsIS,
                  'sector_names': sector_names,
                  'NRiskyAssets': NRiskyAssets}
 
-# with open('DCC_EGARCH_PATH25K_standard_seed0100.pkl', 'wb') as file:
+# with open('DCC_EGARCH_PATH.pkl', 'wb') as file:
 #     pickle.dump(variable_list, file)
 
 print('Done!')
+
+pass

@@ -20,7 +20,6 @@ from arch.utility.exceptions import (
 from arch.univariate import ARCHInMean
 from arch.univariate.base import ARCHModelResult
 
-
 _callback_info = {"iter": 0, "llf": 0.0, "count": 0, "display": 1}
 
 

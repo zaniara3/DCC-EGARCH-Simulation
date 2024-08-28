@@ -5,8 +5,7 @@ import CARCHINMean
 
 from scipy.stats import norm
 from scipy.stats import multivariate_normal
-from scipy.linalg import cholesky
-from arch.univariate import EGARCH, ARCHInMean
+from arch.univariate import EGARCH
 
 
 def vecl(matrix):
@@ -18,16 +17,8 @@ def vecl(matrix):
 
 
 def garch_to_u(res):
-    # try:
-    #     mu = res.params["mu"]
-    #     kappa = res.params["kappa"]
-    # except:
-    #     mu = res.params["Const"]
-    #     kappa = res.params["kappa"]
     cv = res.conditional_volatility
-    # est_r = rets - mu - kappa * cv ** 2
-    # USE res.std_resid
-    std_res = res.std_resid  # est_r / h
+    std_res = res.std_resid
     resid = res.resid
     udata = norm.cdf(std_res)
     return udata, cv, resid.values
@@ -39,7 +30,7 @@ def loglike_norm_dcc_copula(theta, udata, Dt_mat, resid_list):
     llf = llf
     trdata = np.array(norm.ppf(udata).T, ndmin=2)
 
-    Rt, veclRt, Qt = dcceq(theta, trdata, Dt_mat, resid_list)
+    Rt, veclRt, Qt, Qbar = dcceq(theta, trdata, Dt_mat, resid_list)
 
     for i in range(0, T):
         llf[i] = -0.5 * np.log(np.linalg.det(Rt[:, :, i]))
@@ -49,23 +40,21 @@ def loglike_norm_dcc_copula(theta, udata, Dt_mat, resid_list):
 
     return -llf
 
+
 def dcceq(theta, trdata, Dt_mat, resid_list):
     T, N = np.shape(trdata)
-
     a, b = theta
-
     if min(a, b) < 0 or max(a, b) > 1 or a + b > .999999:
         a = .9999 - b
-
     eps = np.zeros((N, T))
     for i in range(T):
         eps[:, i] = np.matmul(np.diag(1 / np.diag(Dt_mat[:, :, i])), resid_list[:, i])
 
-    Qbar = np.cov(eps)  # np.corrcoef(trdata.T)
+    Qbar = np.cov(eps)
 
     Qt = np.zeros((N, N, T))
 
-    Qt[:, :, 0] = Qbar  # np.corrcoef(trdata.T)
+    Qt[:, :, 0] = Qbar
 
     Rt = np.zeros((N, N, T))
     veclRt = np.zeros((T, int(N * (N - 1) / 2)))
@@ -75,25 +64,26 @@ def dcceq(theta, trdata, Dt_mat, resid_list):
 
     for j in range(1, T):
         Qt[:, :, j] = Qbar * (1 - a - b)
-        Qt[:, :, j] = Qt[:, :, j] + a * np.outer(trdata[j - 1], trdata[j - 1])
+        Qt[:, :, j] = Qt[:, :, j] + a * np.outer(eps[:, j - 1], eps[:, j - 1])
         Qt[:, :, j] = Qt[:, :, j] + b * Qt[:, :, j - 1]
         Qstar_inv = np.diag(1.0 / np.sqrt(np.diag(Qt[:, :, j])))
         Rt[:, :, j] = Qstar_inv @ Qt[:, :, j] @ Qstar_inv
 
     for j in range(0, T):
         veclRt[j, :] = vecl(Rt[:, :, j].T)
-    return Rt, veclRt, Qt
+    return Rt, veclRt, Qt, Qbar
 
 
 def run_garch_on_return(rets, udata_list, model_parameters, Dt_mat, resid_list, arch_mean_type,
                         model="EGARCH_with_vol_in_mean"):
     i = 0
+    short_name = None
     for x in rets:
         tmp = rets[x].dropna()
-        short_name = '_'.join(x.split())
         if model == "EGARCH_with_vol_in_mean":
             egim = CARCHINMean.CustomARCHInMean(tmp, form='var', volatility=EGARCH(p=1, o=1, q=1))
             result = egim.fit(arch_mean_type=arch_mean_type, update_freq=4, disp='off')
+            short_name = '_'.join(x.split())
             model_parameters[short_name] = result
 
         udata, Dt, resid = garch_to_u(model_parameters[short_name])
@@ -108,80 +98,69 @@ def run_garch_on_return(rets, udata_list, model_parameters, Dt_mat, resid_list, 
 # DCC_EGARCH class
 class DCC_EGARCH:
 
-    def __init__(self, trdata, dccparams, a, b, sims, burn=1000):
-        self.std_err = None
-        self.volatility = None
+    def __init__(self, trdata, dccparams, a, b, sims, nburn=2000):
         self.params = dccparams
         self.a = a
         self.b = b
-        self.burn = burn
-        self.sims = burn + sims
+        self.burn = nburn
+        self.sims = nburn + sims
         self.N = dccparams.shape[0]
         self.trdata = trdata
+        self.volatility = None
+        self.unierrors = None
 
     # Simulate univariate EGARCH(1,1) processes
-    def simulate_egarch(self):  # n, omega, alpha, gamma, beta):
-        volatility = np.empty([self.sims, self.N])  # matrix storing simulated volatilities
-        std_err = np.empty([self.sims, self.N])  # matrix storing standard errors
-        for asset in range(self.N):
-            am = ARCHInMean(None, form='var', volatility=EGARCH(p=1, o=1, q=1))
-            sim_data = am.simulate(
-                [self.params[asset, 0], self.params[asset, 1], self.params[asset, 2], self.params[asset, 3],
-                 self.params[asset, 4], self.params[asset, 5]], self.sims)
-            volatility[:, asset] = sim_data['volatility']
-            std_err[:, asset] = sim_data['errors'] / sim_data['volatility']
+    def simulate_egarch(self):
+        variance_uni = np.empty([self.sims, self.N])
+        uniret = np.empty([self.sims, self.N])
+        unierrors = np.empty([self.sims, self.N])
+        variance_uni[0, :] = np.exp(self.params[:, 2] / (1 - self.params[:, 5]))
+        zt = multivariate_normal.rvs(mean=np.zeros(self.N), cov=np.eye(self.N), size=self.sims)
+        unierrors[0, :] = np.sqrt(variance_uni[0, :]) * zt[0, :]
+        uniret[0, :] = self.params[:, 0] + self.params[:, 1] * variance_uni[0, :]
 
-        self.volatility = volatility
-        self.std_err = std_err
+        for t in range(1, self.sims):
+            variance_uni[t, :] = np.exp(
+                self.params[:, 2] + self.params[:, 3] * (np.abs(zt[t - 1, :]) - np.sqrt(2 / np.pi))
+                + self.params[:, 4] * zt[t - 1, :] + self.params[:, 5] * np.log(variance_uni[t - 1, :]))
+            unierrors[t, :] = np.sqrt(variance_uni[t, :]) * zt[t, :]
+            uniret[t, :] = self.params[:, 0] + self.params[:, 1] * variance_uni[t, :] + unierrors[t, :]
+        self.volatility = np.sqrt(variance_uni)
+        self.unierrors = unierrors
 
     def simulate_dcc2(self):
         std_err = np.empty([self.sims, self.N])  # matrix storing standard errors
-        variance = np.empty([self.sims, self.N])  # matrix storing simulated volatilities
         voltry = np.empty([self.sims, self.N])
         R = np.zeros((self.N, self.N, self.sims))
         aQ = np.zeros((self.N, self.N, self.sims))
-        # H = np.zeros((self.N, self.N))
         DCC_COVAR = np.zeros((self.N, self.N, self.sims))
         DCC_returns = np.zeros((self.sims, self.N))
 
-        # Initialiser les matrices de corrélation et Q avec la corrélation moyenne
-        mQ = np.corrcoef(self.trdata.T)
+        self.simulate_egarch()
+        variance = self.volatility ** 2
+        mQ = np.cov(self.trdata.T)
         aQ[:, :, 0] = mQ
         Qstar_inv = np.diag(1.0 / np.sqrt(np.diag(aQ[:, :, 0])))
         R[:, :, 0] = Qstar_inv @ aQ[:, :, 0] @ Qstar_inv
-
-        # simulate the zt for all t
-        zt = multivariate_normal.rvs(mean=np.zeros(self.N), cov=np.eye(self.N), size=self.sims)
-        for asset in range(self.N):
-            mu, kappa, omega, alpha, gamma, beta = self.params[asset, :]
-            variance[0, asset] = np.exp(omega / (1 - beta))
-
         D = np.diag(np.sqrt(variance[0, :]))
         H = D @ R[:, :, 0] @ D
         DCC_COVAR[:, :, 0] = H
+        at_lag = multivariate_normal.rvs(mean=np.zeros(self.N), cov=DCC_COVAR[:, :, 0])
+        DCC_returns[0, :] = self.params[:, 0] + self.params[:, 1] * np.diag(H) + at_lag
         # Boucle principale pour la mise à jour de Q
         for t in range(1, self.sims):
-            at_lag = cholesky(H) @ zt[t - 1, :]
-            DCC_returns[t - 1, :] = self.params[:, 0] + self.params[:, 1] * np.diag(H) + at_lag
             std_err[t - 1, :] = np.diag(1.0 / np.diag(D)) @ at_lag
-            for asset in range(self.N):
-                mu, kappa, omega, alpha, gamma, beta = self.params[asset, :]
-                variance[t, asset] = np.exp(
-                    omega + alpha * (np.abs(zt[t - 1, asset]) - np.sqrt(2 / np.pi)) + gamma * zt[
-                        t - 1, asset] + beta * np.log(variance[t - 1, asset]))
-
-            aQ[:, :, t] = (mQ * (1 - self.a - self.b) + self.a * np.outer(std_err[t - 1], std_err[t - 1])
-                           + self.b * aQ[:, :, t - 1])
+            aQ[:, :, t] = mQ * (1 - self.a - self.b) + self.a * np.outer(std_err[t - 1, :],
+                                                                         std_err[t - 1, :]) + self.b * aQ[:, :, t - 1]
             Qstar_inv = np.diag(1.0 / np.sqrt(np.diag(aQ[:, :, t])))
             R[:, :, t] = Qstar_inv @ aQ[:, :, t] @ Qstar_inv
 
             D = np.diag(np.sqrt(variance[t, :]))
             H = D @ R[:, :, t] @ D
             DCC_COVAR[:, :, t] = H
-            if t == self.sims - 1:
-                at = cholesky(H) @ zt[t, :]
-                DCC_returns[t, :] = self.params[:, 0] + self.params[:, 1] * np.diag(H) + at
-                std_err[t, :] = np.diag(1.0 / np.diag(D)) @ at
+
+            at_lag = multivariate_normal.rvs(mean=np.zeros(self.N), cov=DCC_COVAR[:, :, t])
+            DCC_returns[t, :] = self.params[:, 0] + self.params[:, 1] * np.diag(H) + at_lag
         out = {
             "Rt": R[:, :, self.burn:],  # Corrélations dynamiques
             "volatility": np.sqrt(variance[self.burn:, :]),  # Volatilités univariées
